@@ -13,6 +13,7 @@ Flow:
 from __future__ import annotations
 
 import argparse
+import collections
 import datetime as dt
 import hashlib
 import json
@@ -313,6 +314,77 @@ def init_projects(config: dict[str, Any]) -> dict[str, Any]:
             }
         )
     return {"projects": projects}
+
+
+def parse_run_time(run: dict[str, Any]) -> dt.datetime:
+    for key in ("executed_at", "reviewed_at", "created_at"):
+        value = run.get(key)
+        if isinstance(value, str) and value:
+            try:
+                return dt.datetime.fromisoformat(value.replace("Z", "+00:00"))
+            except ValueError:
+                continue
+    return dt.datetime.fromtimestamp(0, tz=dt.timezone.utc)
+
+
+def format_local_time(value: dt.datetime) -> str:
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=dt.timezone.utc)
+    return value.astimezone().strftime("%Y-%m-%d %H:%M:%S %Z")
+
+
+def recent_run_brief(run: dict[str, Any]) -> dict[str, Any]:
+    actions = run.get("actions", [])
+    kinds = [action.get("kind", "") for action in actions if isinstance(action, dict)]
+    return {
+        "run_id": run.get("run_id", ""),
+        "status": run.get("status", ""),
+        "source_chat_name": run.get("source_chat_name", run.get("source_chat_id", "")),
+        "action_count": len(actions),
+        "action_kinds": sorted(dict.fromkeys(kinds)),
+        "updated_at": format_local_time(parse_run_time(run)),
+    }
+
+
+def monitor(config: dict[str, Any], *, limit: int = 10) -> dict[str, Any]:
+    runs: list[dict[str, Any]] = []
+    for path in RUNS_DIR.glob("*.json"):
+        run = load_json(path, {})
+        if isinstance(run, dict) and run:
+            runs.append(run)
+
+    runs.sort(key=parse_run_time, reverse=True)
+    status_counts = collections.Counter(str(run.get("status", "unknown")) for run in runs)
+    by_chat: dict[str, dict[str, Any]] = {}
+    for source_chat in config["source_chats"]:
+        chat_id = source_chat["chat_id"]
+        chat_runs = [run for run in runs if run.get("source_chat_id") == chat_id]
+        latest = chat_runs[0] if chat_runs else None
+        by_chat[chat_id] = {
+            "source_chat_name": source_chat.get("name", chat_id),
+            "project_dir": str(project_root(config, {"source_chat_id": chat_id, "source_chat_name": source_chat.get("name", chat_id)})),
+            "total_runs": len(chat_runs),
+            "pending_review": sum(1 for run in chat_runs if run.get("status") == "pending_review"),
+            "latest_run": recent_run_brief(latest) if latest else None,
+        }
+
+    pending = [recent_run_brief(run) for run in runs if run.get("status") == "pending_review"][:limit]
+    errors = [recent_run_brief(run) for run in runs if run.get("status") == "executed_with_errors"][:limit]
+    recent = [recent_run_brief(run) for run in runs[:limit]]
+    processed_count = len(load_json(STATE_FILE, {"processed": []}).get("processed", []))
+
+    return {
+        "generated_at": format_local_time(now_utc()),
+        "summary": {
+            "total_runs": len(runs),
+            "processed_action_ids": processed_count,
+            "status_counts": dict(status_counts),
+        },
+        "pending_review": pending,
+        "recent_errors": errors,
+        "recent_runs": recent,
+        "chats": list(by_chat.values()),
+    }
 
 
 def scan(config: dict[str, Any], *, dry_run: bool) -> dict[str, Any]:
@@ -700,6 +772,8 @@ def main() -> int:
     sub = parser.add_subparsers(dest="command", required=True)
     sub.add_parser("scan", help="scan source group and send review request")
     sub.add_parser("init-projects", help="create per-chat project folders")
+    monitor_parser = sub.add_parser("monitor", help="show workflow health and queue summary")
+    monitor_parser.add_argument("--limit", type=int, default=10, help="number of recent items to show")
     check_parser = sub.add_parser("check", help="check one pending run for approval and execute")
     check_parser.add_argument("run_id")
     sub.add_parser("check-all", help="check all pending runs")
@@ -713,6 +787,8 @@ def main() -> int:
             result = scan(config, dry_run=args.dry_run)
         elif args.command == "init-projects":
             result = init_projects(config)
+        elif args.command == "monitor":
+            result = monitor(config, limit=max(1, args.limit))
         elif args.command == "check":
             result = check(config, args.run_id, dry_run=args.dry_run)
         elif args.command == "check-all":

@@ -179,6 +179,12 @@ Check approval replies and execute approved runs:
 python3 lark_workflow.py --config workflow_config.json check-all
 ```
 
+View workflow health and queue status:
+
+```bash
+python3 lark_workflow.py --config workflow_config.json monitor
+```
+
 Check a specific run:
 
 ```bash

@@ -204,6 +204,12 @@ python3 lark_workflow.py --config workflow_config.json scan
 python3 lark_workflow.py --config workflow_config.json check-all
 ```
 
+查看工作流监控状态：
+
+```bash
+python3 lark_workflow.py --config workflow_config.json monitor
+```
+
 只检查某个 `run_id`：
 
 ```bash
