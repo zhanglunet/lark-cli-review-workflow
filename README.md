@@ -1,110 +1,224 @@
-# Lark CLI Review Workflow
+# 飞书群消息审核工作流
 
-Human-in-the-loop automation for Feishu/Lark group chats, powered by `lark-cli`.
+[English Version](./README.en.md)
 
-The workflow scans configured group chats, detects files, task-like messages, and prompt-like messages, sends each pending action to a reviewer, executes only after approval, and posts execution results back to the source group.
+基于 `lark-cli` 的飞书/Feishu 群消息人审工作流。
 
-## Features
+它会定时扫描指定群聊，识别文件消息、任务消息和提示词消息，先发送给审核人确认，再执行对应动作，并把执行结果推回原群。执行产物会按照群聊拆分到不同项目文件夹，方便长期管理上下文。
 
-- Scan multiple Feishu/Lark group chats.
-- Detect file messages and download approved files.
-- Detect task-like messages and create approved Lark tasks.
-- Detect prompt-like messages and save approved prompts one by one.
-- Keep outputs separated by group in project folders.
-- Send approval requests to a reviewer before any execution.
-- Push execution results back to the original group.
-- Run manually or on a schedule with launchd/cron.
+## 核心能力
 
-## Requirements
+- 扫描多个飞书群聊
+- 识别文件消息并在审核通过后下载
+- 识别任务型文本并在审核通过后创建飞书任务
+- 识别提示词消息，并按单条审核、单条执行
+- 按群聊建立独立项目目录，沉淀文件、提示词和执行结果
+- 通过机器人私信发送审核请求
+- 执行完成后把结果推回原群
+- 支持手动运行，也支持 launchd/cron 定时运行
+
+## 适用场景
+
+- 把群里的文件、指令、任务需求纳入统一处理流
+- 在真正执行前加入人工审核，避免误触发
+- 为不同项目群保留独立上下文，不把文件和提示词混在一起
+- 作为更复杂 Agent/Workflow 的基础调度层
+
+## 设计思路
+
+这个程序的设计重点不是“全自动”，而是“可控自动化”：
+
+1. 群聊是输入层：消息天然杂乱，所以先做识别分类。
+2. 审核是闸门层：任何执行动作都要先经过人工确认。
+3. 执行是动作层：文件下载、任务创建、提示词保存分别走自己的处理逻辑。
+4. 项目目录是上下文层：每个群一个目录，把历史输入和执行结果沉淀下来。
+5. 原群回推是反馈层：让群内成员知道系统做了什么、是否成功。
+
+这样的结构比“群里一句话直接执行”更稳，也更容易审计和扩展。
+
+## 逻辑流程图
+
+```mermaid
+flowchart TD
+    A["定时任务 / 手动运行 scan"] --> B["读取 source_chats 的最近消息"]
+    B --> C["识别消息类型"]
+    C --> C1["文件消息"]
+    C --> C2["任务消息"]
+    C --> C3["提示词消息"]
+    C1 --> D["生成 action"]
+    C2 --> D
+    C3 --> D
+    D --> E["去重 processed action_id"]
+    E --> F["组装 run"]
+    F --> F1["文件/任务可批量"]
+    F --> F2["提示词单条 run"]
+    F1 --> G["发给审核人私信"]
+    F2 --> G
+    G --> H["审核人回复 同意/拒绝 run_id"]
+    H --> I["check / check-all 轮询审核结果"]
+    I --> J{"是否批准"}
+    J -- "拒绝" --> K["写入 rejected 状态"]
+    J -- "同意" --> L["执行 action"]
+    L --> L1["下载文件"]
+    L --> L2["创建任务"]
+    L --> L3["保存提示词文本"]
+    L1 --> M["写入群项目目录"]
+    L2 --> M
+    L3 --> M
+    M --> N["回推执行结果到原群"]
+```
+
+## 架构图
+
+```mermaid
+flowchart LR
+    subgraph Input["输入层"]
+        IM["飞书群消息"]
+        CFG["workflow_config.json"]
+    end
+
+    subgraph Engine["工作流引擎"]
+        SCAN["scan / scan_chat"]
+        EXTRACT["extract_* 识别器"]
+        GROUP["split_action_groups"]
+        REVIEW["create_review_run"]
+        DECIDE["find_review_decision"]
+        EXEC["execute"]
+    end
+
+    subgraph State["状态层"]
+        RUNS[".workflow-state/runs"]
+        PROC[".workflow-state/state.json"]
+    end
+
+    subgraph Output["输出层"]
+        PROJ["projects/<chat>/"]
+        BACK["结果回推原群"]
+        DM["审核私信"]
+    end
+
+    IM --> SCAN
+    CFG --> SCAN
+    SCAN --> EXTRACT
+    EXTRACT --> GROUP
+    GROUP --> REVIEW
+    REVIEW --> DM
+    REVIEW --> RUNS
+    REVIEW --> PROC
+    DM --> DECIDE
+    RUNS --> DECIDE
+    DECIDE --> EXEC
+    EXEC --> PROJ
+    EXEC --> BACK
+    EXEC --> RUNS
+```
+
+## 代码结构
+
+主流程集中在 [lark_workflow.py](./lark_workflow.py)：
+
+- `extract_file_action`：识别文件消息
+- `extract_task_actions`：识别任务型文本
+- `extract_prompt_action`：识别提示词消息
+- `scan` / `scan_chat`：扫描群聊并生成待审核动作
+- `split_action_groups`：把提示词拆成单条审核，把文件/任务保留为批量
+- `create_review_run`：生成 run 并发送审核私信
+- `find_review_decision`：从审核私信中判断同意或拒绝
+- `execute`：执行已批准动作
+- `project_root` / `ensure_project`：按群聊定位和初始化项目目录
+- `send_result`：把执行结果回推原群
+
+## 安装要求
 
 - Python 3.9+
-- [`lark-cli`](https://github.com/zhanglunet/lark-cli) available in `PATH`
-- A Feishu/Lark CLI app configured with `lark-cli config init --new`
+- `PATH` 中可直接调用 `lark-cli`
+- 已用 `lark-cli config init --new` 配置好应用
 
-Common user scopes:
+常用用户权限：
 
 ```bash
 lark-cli auth login --scope "im:message.group_msg:get_as_user im:message.p2p_msg:get_as_user im:message:readonly im:resource task:task:write task:task:read contact:user.base:readonly offline_access"
 ```
 
-Bot sending requires the app bot to have the relevant IM permissions and access to the reviewer/source chats.
+如果需要机器人发送审核消息和结果消息，应用机器人还需要具备对应 IM 权限，并能访问审核人与目标群。
 
-## Configuration
+## 配置说明
 
-Copy the example config:
+从模板生成配置：
 
 ```bash
 cp workflow_config.example.json workflow_config.json
 ```
 
-Edit `workflow_config.json`:
+关键字段：
 
-- `source_chats`: group chats to scan.
-- `source_chats[].chat_id`: Feishu/Lark chat ID such as `oc_xxx`.
-- `source_chats[].project_dir`: folder name under `execution.projects_dir`.
-- `reviewer_user_id`: reviewer open_id such as `ou_xxx`.
-- `scan.lookback_minutes`: how far back each scan should look.
-- `prompt_capture`: keywords and minimum length for prompt detection.
-- `execution.projects_dir`: root folder for per-chat project outputs.
-- `execution.task_assignee`: optional default task assignee.
-- `execution.tasklist_id`: optional Lark tasklist.
+- `source_chats`：需要扫描的群聊列表
+- `source_chats[].chat_id`：群聊 ID，格式如 `oc_xxx`
+- `source_chats[].project_dir`：该群对应的项目目录名
+- `reviewer_user_id`：审核人 open_id，格式如 `ou_xxx`
+- `scan.lookback_minutes`：扫描回看时间窗口
+- `prompt_capture`：提示词识别规则
+- `execution.projects_dir`：所有项目目录的根路径
+- `execution.task_assignee`：默认任务负责人，可为空
+- `execution.tasklist_id`：默认任务清单，可为空
 
-## Detection Rules
+## 识别规则
 
-Files:
+文件消息：
 
-- Message type is `file`, with a file key in the message content.
+- 消息类型是 `file`
+- 内容中包含文件 key
 
-Tasks:
+任务消息：
 
 - `#task Follow up contract`
 - `任务：准备会议纪要`
 - `todo: Call customer`
 - `- [ ] Prepare quote`
 
-Prompts:
+提示词消息：
 
-- Contains words such as `prompt`, `promt`, `提示词`, or `指令`
-- Contains phrases such as `请你`, `帮我`, or `结合这个文档`
-- Meets `prompt_capture.min_chars`
+- 包含 `prompt`、`promt`、`提示词`、`指令`
+- 或包含 `请你`、`帮我`、`结合这个文档`
+- 同时满足 `prompt_capture.min_chars`
 
-Prompt messages are always reviewed separately. One prompt creates one `run_id`, and approving that `run_id` executes only that prompt.
+提示词永远是单条审核、单条执行。一条提示词对应一个 `run_id`。
 
-## Usage
+## 使用方式
 
-Create per-chat project folders:
+初始化按群项目目录：
 
 ```bash
 python3 lark_workflow.py --config workflow_config.json init-projects
 ```
 
-Scan chats and send review requests:
+扫描群聊并发送审核：
 
 ```bash
 python3 lark_workflow.py --config workflow_config.json scan
 ```
 
-Check approval replies and execute approved runs:
+检查审核回复并执行：
 
 ```bash
 python3 lark_workflow.py --config workflow_config.json check-all
 ```
 
-Check a specific run:
+只检查某个 `run_id`：
 
 ```bash
 python3 lark_workflow.py --config workflow_config.json check <run_id>
 ```
 
-Dry-run command preview:
+预览将要调用的命令：
 
 ```bash
 python3 lark_workflow.py --config workflow_config.json --dry-run scan
 ```
 
-## Approval
+## 审核机制
 
-The reviewer receives messages like:
+审核人会收到这样的私信：
 
 ```text
 工作流待审核：a1b2c3d4e5
@@ -115,23 +229,23 @@ The reviewer receives messages like:
 回复“同意 a1b2c3d4e5”后自动执行；回复“拒绝 a1b2c3d4e5”将取消。
 ```
 
-Approve:
+批准：
 
 ```text
 同意 a1b2c3d4e5
 ```
 
-Reject:
+拒绝：
 
 ```text
 拒绝 a1b2c3d4e5
 ```
 
-`check-all` executes at most one newly approved pending run per invocation.
+`check-all` 每次最多执行一个刚刚被批准的待处理 run，这样节奏更可控。
 
-## Project Folders
+## 项目目录
 
-Outputs are stored by source chat:
+每个群聊都有独立目录：
 
 ```text
 projects/
@@ -142,38 +256,38 @@ projects/
     results/
 ```
 
-- `files/`: approved downloaded files
-- `prompts/`: approved prompt text
-- `results/`: execution records
-- `context.md`: per-chat context notes
+- `files/`：审核通过后下载的文件
+- `prompts/`：审核通过后保存的提示词文本
+- `results/`：执行结果记录
+- `context.md`：该群的上下文说明
 
-## Scheduling
+## 定时运行
 
-Example launchd plist templates are in `examples/launchd/`.
+`examples/launchd/` 中提供了 launchd 模板。
 
-Typical cadence:
+推荐频率：
 
-- Scan every 5 minutes.
-- Check approvals every 1 minute.
+- 每 5 分钟执行一次 `scan`
+- 每 1 分钟执行一次 `check-all`
 
-Cron equivalent:
+对应 cron：
 
 ```cron
 */5 * * * * cd /path/to/lark-cli-review-workflow && python3 lark_workflow.py --config workflow_config.json scan >> workflow.log 2>&1
 * * * * * cd /path/to/lark-cli-review-workflow && python3 lark_workflow.py --config workflow_config.json check-all >> workflow.log 2>&1
 ```
 
-## Local State
+## 本地状态与安全
 
-Ignored local files:
+以下内容默认不会进入 Git：
 
 - `workflow_config.json`
 - `.workflow-state/`
 - `projects/`
-- `downloads/`
 - `*.log`
+- `*.err`
 
-Do not commit real chat IDs, open IDs, file keys, run state, downloaded files, or prompt contents.
+不要提交真实的群聊 ID、open_id、文件 key、运行状态、下载文件或提示词内容。
 
 ## License
 
