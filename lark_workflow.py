@@ -50,6 +50,9 @@ DEFAULT_PROMPT_REQUIRED_ANY = [
 ]
 DEFAULT_PROMPT_ACTION_HINTS = [
     "分析",
+    "设计",
+    "绘制",
+    "画",
     "总结",
     "撰写",
     "生成",
@@ -71,6 +74,15 @@ DEFAULT_PROMPT_DATA_HINTS = [
     "excel",
     "ppt",
     "pdf",
+]
+DEFAULT_PROMPT_VISUAL_HINTS = [
+    "logo",
+    "svg",
+    "矢量",
+    "草图",
+    "图标",
+    "标志",
+    "视觉",
 ]
 WORKFLOW_ARTIFACT_PATTERNS = [
     re.compile(r"^[0-9a-f]{16}-om_.*\.txt$", re.I),
@@ -99,7 +111,7 @@ def load_json(path: Path, default: Any) -> Any:
 
 def save_json(path: Path, data: Any) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp = path.with_name(f"{path.name}.{uuid.uuid4().hex}.tmp")
     with tmp.open("w", encoding="utf-8") as fh:
         json.dump(data, fh, ensure_ascii=False, indent=2)
         fh.write("\n")
@@ -298,21 +310,26 @@ def is_workflow_artifact_name(name: str) -> bool:
 def is_prompt_like_text(text: str, config: dict[str, Any]) -> bool:
     prompt_cfg = config.get("prompt_capture", {})
     min_chars = int(prompt_cfg.get("min_chars", 20))
+    short_visual_min_chars = int(prompt_cfg.get("short_visual_min_chars", 8))
     normalized = normalize_text(text)
-    if len(normalized) < min_chars:
-        return False
 
     keywords = [str(item).lower() for item in prompt_cfg.get("keywords", DEFAULT_PROMPT_KEYWORDS)]
     required_any = [str(item).lower() for item in prompt_cfg.get("required_any", DEFAULT_PROMPT_REQUIRED_ANY)]
     action_hints = [str(item).lower() for item in prompt_cfg.get("action_hints", DEFAULT_PROMPT_ACTION_HINTS)]
     data_hints = [str(item).lower() for item in prompt_cfg.get("data_hints", DEFAULT_PROMPT_DATA_HINTS)]
+    visual_hints = [str(item).lower() for item in prompt_cfg.get("visual_hints", DEFAULT_PROMPT_VISUAL_HINTS)]
     lowered = normalized.lower()
     has_keyword = any(contains_prompt_token(lowered, keyword) for keyword in keywords) if keywords else False
     has_required_any = any(contains_prompt_token(lowered, token) for token in required_any) if required_any else False
     has_action_hint = any(contains_prompt_token(lowered, token) for token in action_hints) if action_hints else False
     has_data_hint = any(contains_prompt_token(lowered, token) for token in data_hints) if data_hints else False
+    has_visual_hint = any(contains_prompt_token(lowered, token) for token in visual_hints) if visual_hints else False
+    is_visual_prompt = has_action_hint and has_visual_hint
 
-    return has_keyword or has_required_any or (has_action_hint and has_data_hint)
+    if len(normalized) < min_chars:
+        return len(normalized) >= short_visual_min_chars and is_visual_prompt
+
+    return has_keyword or has_required_any or (has_action_hint and has_data_hint) or is_visual_prompt
 
 
 def extract_prompt_action(message: dict[str, Any], config: dict[str, Any]) -> dict[str, Any] | None:

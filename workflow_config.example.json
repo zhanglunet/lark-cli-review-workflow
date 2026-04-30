@@ -14,10 +14,12 @@
   },
   "prompt_capture": {
     "min_chars": 20,
+    "short_visual_min_chars": 8,
     "keywords": ["prompt", "promt", "提示词", "指令", "请你", "帮我", "结合这个文档"],
     "required_any": ["prompt", "promt", "提示词", "指令", "请你", "帮我", "结合这个文档", "分析群里所有的文件"],
-    "action_hints": ["分析", "总结", "撰写", "生成", "输出", "整理", "提取", "对比", "归纳", "做一个", "方案", "报告"],
+    "action_hints": ["分析", "设计", "绘制", "画", "总结", "撰写", "生成", "输出", "整理", "提取", "对比", "归纳", "做一个", "方案", "报告"],
     "data_hints": ["文件", "文档", "资料", "数据", "表格", "excel", "ppt", "pdf"],
+    "visual_hints": ["logo", "svg", "矢量", "草图", "图标", "标志", "视觉"],
     "source_files": {
       "max_files": 3,
       "max_all_files": 12,

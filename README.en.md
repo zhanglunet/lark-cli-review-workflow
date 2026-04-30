@@ -215,7 +215,8 @@ The default executor uses local `codex`:
 
 - the workflow assembles a prompt job directory
 - `prompt_job_executor.py` reads the attached files, builds source context, and calls `codex exec`
-- outputs are written to `jobs/<run_id>/outputs/result.md` and `result.json`
+- regular analysis outputs are written to `jobs/<run_id>/outputs/result.md` and `result.json`
+- design-oriented prompts prefer `jobs/<run_id>/outputs/result.svg` and also include a short `result.md`
 - the workflow then pushes the summary and generated files back to the source chat
 
 ## Project Folders

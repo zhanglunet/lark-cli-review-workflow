@@ -17,6 +17,17 @@ except Exception:  # pragma: no cover
     PdfReader = None
 
 
+VISUAL_HINTS = [
+    "logo",
+    "svg",
+    "矢量",
+    "草图",
+    "图标",
+    "标志",
+    "视觉",
+]
+
+
 def read_prompt(prompt_path: Path) -> str:
     text = prompt_path.read_text(encoding="utf-8")
     parts = text.split("\n\n", 1)
@@ -101,7 +112,34 @@ def build_context(input_dir: Path, max_chars: int) -> tuple[str, list[dict[str, 
     return "\n".join(sections).strip(), files_meta
 
 
-def build_codex_prompt(prompt: str, source_context: str, manifest_path: Path) -> str:
+def is_visual_prompt(prompt: str) -> bool:
+    lowered = prompt.lower()
+    return any(token in lowered for token in VISUAL_HINTS) and any(token in lowered for token in ["设计", "绘制", "画", "logo", "svg"])
+
+
+def build_codex_prompt(prompt: str, source_context: str, manifest_path: Path, *, output_mode: str) -> str:
+    if output_mode == "svg":
+        return "\n".join(
+            [
+                "You are executing a reviewed workflow job.",
+                "Use the provided source files as the primary evidence base.",
+                "Generate one clean standalone SVG logo concept.",
+                "The final answer must be raw SVG markup only.",
+                "Do not wrap the SVG in Markdown fences.",
+                "Do not add any explanation before or after the SVG.",
+                "Keep the SVG vector-only and self-contained, with no external assets.",
+                "Prefer a professional brand-mark style suitable for a strategy draft.",
+                "",
+                f"Manifest path: {manifest_path}",
+                "",
+                "# User Prompt",
+                prompt.strip(),
+                "",
+                "# Source Materials",
+                source_context.strip() or "[No readable source files were found.]",
+            ]
+        ).strip() + "\n"
+
     return "\n".join(
         [
             "You are executing a reviewed workflow job.",
@@ -120,6 +158,23 @@ def build_codex_prompt(prompt: str, source_context: str, manifest_path: Path) ->
             source_context.strip() or "[No readable source files were found.]",
         ]
     ).strip() + "\n"
+
+
+def extract_svg_markup(text: str) -> str:
+    stripped = text.strip()
+    if stripped.startswith("```"):
+        lines = stripped.splitlines()
+        if lines and lines[0].startswith("```"):
+            lines = lines[1:]
+        if lines and lines[-1].strip() == "```":
+            lines = lines[:-1]
+        stripped = "\n".join(lines).strip()
+    start = stripped.find("<svg")
+    end = stripped.rfind("</svg>")
+    if start == -1 or end == -1:
+        raise RuntimeError("codex did not return SVG markup")
+    end += len("</svg>")
+    return stripped[start:end] + "\n"
 
 
 def run_codex(
@@ -185,12 +240,13 @@ def main() -> int:
 
     prompt = read_prompt(prompt_path)
     source_context, files_meta = build_context(input_dir, args.max_source_chars)
-    prompt_text = build_codex_prompt(prompt, source_context, manifest_path)
+    output_mode = "svg" if is_visual_prompt(prompt) else "markdown"
+    prompt_text = build_codex_prompt(prompt, source_context, manifest_path, output_mode=output_mode)
 
     rendered_prompt_path = output_dir / "executor_prompt.txt"
     rendered_prompt_path.write_text(prompt_text, encoding="utf-8")
-    result_md = output_dir / "result.md"
     trace_path = output_dir / "executor_trace.json"
+    result_path = output_dir / ("result.svg" if output_mode == "svg" else "result.md")
 
     runner = args.runner.lower().strip()
     if runner != "codex":
@@ -201,18 +257,38 @@ def main() -> int:
         model=args.model,
         workdir=manifest_path.parent,
         prompt_text=prompt_text,
-        output_path=result_md,
+        output_path=result_path,
         trace_path=trace_path,
     )
+
+    if output_mode == "svg":
+        svg = extract_svg_markup(result_path.read_text(encoding="utf-8", errors="ignore"))
+        result_path.write_text(svg, encoding="utf-8")
+        summary_path = output_dir / "result.md"
+        summary_path.write_text(
+            "\n".join(
+                [
+                    "# SVG Logo Draft",
+                    "",
+                    "Generated a vector logo draft based on the reviewed prompt and attached source files.",
+                    "",
+                    "- Primary artifact: `result.svg`",
+                    "",
+                ]
+            )
+            + "\n",
+            encoding="utf-8",
+        )
 
     metadata = {
         "runner": runner,
         "model": args.model,
         "codex_bin": args.codex_bin,
+        "output_mode": output_mode,
         "prompt_path": str(prompt_path),
         "manifest_path": str(manifest_path),
         "source_files": files_meta,
-        "result_path": str(result_md),
+        "result_path": str(result_path),
         "executor_prompt_path": str(rendered_prompt_path),
         "executor_trace_path": str(trace_path),
     }
