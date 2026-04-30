@@ -15,14 +15,19 @@
   "prompt_capture": {
     "min_chars": 20,
     "keywords": ["prompt", "promt", "提示词", "指令", "请你", "帮我", "结合这个文档"],
+    "required_any": ["prompt", "promt", "提示词", "指令", "请你", "帮我", "结合这个文档", "分析群里所有的文件"],
+    "action_hints": ["分析", "总结", "撰写", "生成", "输出", "整理", "提取", "对比", "归纳", "做一个", "方案", "报告"],
+    "data_hints": ["文件", "文档", "资料", "数据", "表格", "excel", "ppt", "pdf"],
     "source_files": {
       "max_files": 3,
+      "max_all_files": 12,
       "lookback_messages": 20
     }
   },
   "prompt_execution": {
     "command": [
-      "/path/to/your-executor",
+      "/Users/john/.cache/codex-runtimes/codex-primary-runtime/dependencies/python/bin/python3",
+      "prompt_job_executor.py",
       "--prompt",
       "{prompt_path}",
       "--inputs",
@@ -30,7 +35,11 @@
       "--output",
       "{output_dir}",
       "--manifest",
-      "{manifest_path}"
+      "{manifest_path}",
+      "--provider",
+      "openrouter",
+      "--model",
+      "anthropic/claude-3.5-sonnet"
     ]
   },
   "approval": {

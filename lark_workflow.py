@@ -38,6 +38,44 @@ TASK_PATTERNS = [
 ]
 FILE_TAG_PATTERN = re.compile(r'<file\s+[^>]*key="(?P<key>[^"]+)"[^>]*name="(?P<name>[^"]+)"[^>]*/?>')
 DEFAULT_PROMPT_KEYWORDS = ["prompt", "promt", "提示词", "指令", "请你", "帮我", "结合这个文档"]
+DEFAULT_PROMPT_REQUIRED_ANY = [
+    "prompt",
+    "promt",
+    "提示词",
+    "指令",
+    "请你",
+    "帮我",
+    "结合这个文档",
+    "分析群里所有的文件",
+]
+DEFAULT_PROMPT_ACTION_HINTS = [
+    "分析",
+    "总结",
+    "撰写",
+    "生成",
+    "输出",
+    "整理",
+    "提取",
+    "对比",
+    "归纳",
+    "做一个",
+    "方案",
+    "报告",
+]
+DEFAULT_PROMPT_DATA_HINTS = [
+    "文件",
+    "文档",
+    "资料",
+    "数据",
+    "表格",
+    "excel",
+    "ppt",
+    "pdf",
+]
+WORKFLOW_ARTIFACT_PATTERNS = [
+    re.compile(r"^[0-9a-f]{16}-om_.*\.txt$", re.I),
+    re.compile(r".*-prompt-job\.zip$", re.I),
+]
 
 
 class WorkflowError(RuntimeError):
@@ -111,6 +149,13 @@ def message_type(message: dict[str, Any]) -> str:
     return str(message.get("msg_type") or message.get("message_type") or message.get("type") or "")
 
 
+def sender_type(message: dict[str, Any]) -> str:
+    sender = message.get("sender") or {}
+    if isinstance(sender, dict):
+        return str(sender.get("sender_type") or sender.get("type") or "")
+    return ""
+
+
 def content_obj(message: dict[str, Any]) -> Any:
     content = message.get("content")
     if isinstance(content, str):
@@ -160,8 +205,10 @@ def flatten_text(items: list[Any]) -> list[str]:
 
 
 def extract_file_action(message: dict[str, Any]) -> dict[str, Any] | None:
+    if sender_type(message) != "user":
+        return None
     file_info = extract_file_info(message)
-    if file_info:
+    if file_info and not is_workflow_artifact_name(file_info["file_name"]):
         return {
             "kind": "download_file",
             "message_id": file_info["message_id"],
@@ -227,23 +274,58 @@ def compact_text(text: str, limit: int = 180) -> str:
     return compacted[: limit - 1] + "..."
 
 
+def normalize_text(text: str) -> str:
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def contains_prompt_token(text: str, token: str) -> bool:
+    lowered = text.lower()
+    token = token.lower().strip()
+    if not token:
+        return False
+    if token == "帮我":
+        return "帮我" in lowered and "帮我们" not in lowered
+    if re.fullmatch(r"[a-z0-9_.-]+", token):
+        return re.search(rf"(?<![a-z0-9]){re.escape(token)}(?![a-z0-9])", lowered) is not None
+    return token in lowered
+
+
+def is_workflow_artifact_name(name: str) -> bool:
+    candidate = name.strip()
+    return any(pattern.search(candidate) for pattern in WORKFLOW_ARTIFACT_PATTERNS)
+
+
+def is_prompt_like_text(text: str, config: dict[str, Any]) -> bool:
+    prompt_cfg = config.get("prompt_capture", {})
+    min_chars = int(prompt_cfg.get("min_chars", 20))
+    normalized = normalize_text(text)
+    if len(normalized) < min_chars:
+        return False
+
+    keywords = [str(item).lower() for item in prompt_cfg.get("keywords", DEFAULT_PROMPT_KEYWORDS)]
+    required_any = [str(item).lower() for item in prompt_cfg.get("required_any", DEFAULT_PROMPT_REQUIRED_ANY)]
+    action_hints = [str(item).lower() for item in prompt_cfg.get("action_hints", DEFAULT_PROMPT_ACTION_HINTS)]
+    data_hints = [str(item).lower() for item in prompt_cfg.get("data_hints", DEFAULT_PROMPT_DATA_HINTS)]
+    lowered = normalized.lower()
+    has_keyword = any(contains_prompt_token(lowered, keyword) for keyword in keywords) if keywords else False
+    has_required_any = any(contains_prompt_token(lowered, token) for token in required_any) if required_any else False
+    has_action_hint = any(contains_prompt_token(lowered, token) for token in action_hints) if action_hints else False
+    has_data_hint = any(contains_prompt_token(lowered, token) for token in data_hints) if data_hints else False
+
+    return has_keyword or has_required_any or (has_action_hint and has_data_hint)
+
+
 def extract_prompt_action(message: dict[str, Any], config: dict[str, Any]) -> dict[str, Any] | None:
     msg_type = message_type(message)
     if msg_type not in {"text", "post"}:
+        return None
+    if sender_type(message) != "user":
         return None
 
     text = content_text(message).strip()
     if not text:
         return None
-
-    prompt_cfg = config.get("prompt_capture", {})
-    min_chars = int(prompt_cfg.get("min_chars", 20))
-    if len(text) < min_chars:
-        return None
-
-    keywords = [str(item).lower() for item in prompt_cfg.get("keywords", DEFAULT_PROMPT_KEYWORDS)]
-    lowered = text.lower()
-    if keywords and not any(keyword in lowered for keyword in keywords):
+    if not is_prompt_like_text(text, config):
         return None
 
     return {
@@ -264,10 +346,13 @@ def attach_prompt_source_files(
 ) -> dict[str, Any]:
     source_cfg = config.get("prompt_capture", {}).get("source_files", {})
     max_files = max(0, int(source_cfg.get("max_files", 3)))
+    max_all_files = max(max_files, int(source_cfg.get("max_all_files", 12)))
     lookback_messages = max(0, int(source_cfg.get("lookback_messages", 20)))
     if max_files == 0:
         action["source_files"] = []
         return action
+    text = normalize_text(str(action.get("text", ""))).lower()
+    target_max = max_all_files if any(token in text for token in ["所有的文件", "全部文件", "群里所有的文件", "所有文件"]) else max_files
 
     selected: list[dict[str, Any]] = []
     seen: set[str] = set()
@@ -276,7 +361,12 @@ def attach_prompt_source_files(
         for item in messages:
             if message_id(item) == reply_to:
                 file_info = extract_file_info(item)
-                if file_info and file_info["message_id"] not in seen:
+                if (
+                    file_info
+                    and sender_type(item) == "user"
+                    and not is_workflow_artifact_name(file_info["file_name"])
+                    and file_info["message_id"] not in seen
+                ):
                     selected.append(file_info)
                     seen.add(file_info["message_id"])
                 break
@@ -284,19 +374,54 @@ def attach_prompt_source_files(
     start = max(0, current_index - lookback_messages)
     for item in reversed(messages[start:current_index]):
         file_info = extract_file_info(item)
-        if not file_info or file_info["message_id"] in seen:
+        if (
+            not file_info
+            or sender_type(item) != "user"
+            or is_workflow_artifact_name(file_info["file_name"])
+            or file_info["message_id"] in seen
+        ):
             continue
         selected.append(file_info)
         seen.add(file_info["message_id"])
-        if len(selected) >= max_files:
+        if len(selected) >= target_max:
             break
 
-    action["source_files"] = selected[:max_files]
+    action["source_files"] = selected[:target_max]
     return action
 
 
 def fingerprint(action: dict[str, Any]) -> str:
     raw = json.dumps(action, ensure_ascii=False, sort_keys=True)
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:16]
+
+
+def stable_action_identity(action: dict[str, Any]) -> str:
+    kind = str(action.get("kind", ""))
+    message = str(action.get("message_id", ""))
+    if kind == "download_file":
+        return json.dumps(
+            {"kind": kind, "message_id": message, "file_key": str(action.get("file_key", ""))},
+            ensure_ascii=False,
+            sort_keys=True,
+        )
+    if kind == "create_task":
+        return json.dumps(
+            {"kind": kind, "message_id": message, "summary": normalize_text(str(action.get("summary", "")))},
+            ensure_ascii=False,
+            sort_keys=True,
+        )
+    if kind == "capture_prompt":
+        return json.dumps(
+            {"kind": kind, "message_id": message, "text": normalize_text(str(action.get("text", "")))},
+            ensure_ascii=False,
+            sort_keys=True,
+        )
+    payload = {key: value for key, value in action.items() if key != "action_id"}
+    return json.dumps(payload, ensure_ascii=False, sort_keys=True)
+
+
+def stable_action_id(action: dict[str, Any]) -> str:
+    raw = stable_action_identity(action)
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:16]
 
 
@@ -397,6 +522,7 @@ def recent_run_brief(run: dict[str, Any]) -> dict[str, Any]:
 
 
 def monitor(config: dict[str, Any], *, limit: int = 10) -> dict[str, Any]:
+    reconcile_runs(config)
     runs: list[dict[str, Any]] = []
     for path in RUNS_DIR.glob("*.json"):
         run = load_json(path, {})
@@ -449,6 +575,7 @@ def scan(config: dict[str, Any], *, dry_run: bool) -> dict[str, Any]:
 
 
 def scan_chat(config: dict[str, Any], source_chat: dict[str, str], *, dry_run: bool) -> dict[str, Any]:
+    reconcile_runs(config)
     state = load_json(STATE_FILE, {"processed": []})
     processed = set(state.get("processed", []))
     lookback = int(config["scan"].get("lookback_minutes", 60))
@@ -490,7 +617,7 @@ def scan_chat(config: dict[str, Any], source_chat: dict[str, str], *, dry_run: b
 
     unique: list[dict[str, Any]] = []
     for action in actions:
-        action["action_id"] = fingerprint(action)
+        action["action_id"] = stable_action_id(action)
         if action["action_id"] not in processed:
             unique.append(action)
 
@@ -545,6 +672,104 @@ def create_review_run(
         state["processed"] = sorted(processed)
         save_json(STATE_FILE, state)
     return run
+
+
+def rebuild_processed_state(runs: list[dict[str, Any]]) -> list[str]:
+    processed: set[str] = set()
+    for run in runs:
+        if run.get("status") == "superseded":
+            continue
+        for action in run.get("actions", []):
+            action_id = action.get("action_id")
+            if action_id:
+                processed.add(str(action_id))
+    return sorted(processed)
+
+
+def reconcile_runs(config: dict[str, Any]) -> dict[str, Any]:
+    runs: list[dict[str, Any]] = []
+    for path in sorted(RUNS_DIR.glob("*.json")):
+        run = load_json(path, {})
+        if isinstance(run, dict) and run:
+            runs.append(run)
+
+    if not runs:
+        save_json(STATE_FILE, {"processed": []})
+        return {"updated_runs": 0, "superseded_runs": 0}
+
+    changed = 0
+    superseded = 0
+    action_groups: dict[tuple[str, ...], list[dict[str, Any]]] = collections.defaultdict(list)
+
+    for run in runs:
+        run_changed = False
+        actions = run.get("actions", [])
+        stable_ids: list[str] = []
+        for action in actions:
+            if not isinstance(action, dict):
+                continue
+            new_action_id = stable_action_id(action)
+            if action.get("action_id") != new_action_id:
+                action["action_id"] = new_action_id
+                run_changed = True
+            if action.get("kind") == "capture_prompt":
+                source_files = action.get("source_files", [])
+                filtered_sources = [
+                    item for item in source_files if not is_workflow_artifact_name(str(item.get("file_name", "")))
+                ]
+                if filtered_sources != source_files:
+                    action["source_files"] = filtered_sources
+                    run_changed = True
+            stable_ids.append(new_action_id)
+
+        if run.get("status") == "pending_review":
+            prompt_actions = [action for action in actions if action.get("kind") == "capture_prompt"]
+            if prompt_actions and not all(is_prompt_like_text(str(action.get("text", "")), config) for action in prompt_actions):
+                run["status"] = "superseded"
+                run["superseded_at"] = iso_z(now_utc())
+                run["superseded_reason"] = "prompt no longer matches current capture rules"
+                run_changed = True
+                superseded += 1
+            file_actions = [action for action in actions if action.get("kind") == "download_file"]
+            if file_actions and all(is_workflow_artifact_name(str(action.get("file_name", ""))) for action in file_actions):
+                run["status"] = "superseded"
+                run["superseded_at"] = iso_z(now_utc())
+                run["superseded_reason"] = "workflow-generated artifact file"
+                run_changed = True
+                superseded += 1
+
+        if stable_ids:
+            action_groups[tuple(sorted(stable_ids))].append(run)
+
+        if run_changed:
+            save_json(RUNS_DIR / f"{run['run_id']}.json", run)
+            changed += 1
+
+    for group in action_groups.values():
+        if len(group) < 2:
+            continue
+        active = [run for run in group if run.get("status") != "superseded"]
+        if len(active) < 2:
+            continue
+        active.sort(key=parse_run_time, reverse=True)
+        keeper = active[0]
+        for run in active[1:]:
+            if run.get("status") != "pending_review":
+                continue
+            run["status"] = "superseded"
+            run["superseded_at"] = iso_z(now_utc())
+            run["superseded_reason"] = f"duplicate of {keeper['run_id']}"
+            save_json(RUNS_DIR / f"{run['run_id']}.json", run)
+            changed += 1
+            superseded += 1
+
+    refreshed_runs: list[dict[str, Any]] = []
+    for path in sorted(RUNS_DIR.glob("*.json")):
+        run = load_json(path, {})
+        if isinstance(run, dict) and run:
+            refreshed_runs.append(run)
+    save_json(STATE_FILE, {"processed": rebuild_processed_state(refreshed_runs)})
+    return {"updated_runs": changed, "superseded_runs": superseded}
 
 
 def format_actions(actions: list[dict[str, Any]]) -> str:
@@ -957,6 +1182,7 @@ def send_result(config: dict[str, Any], run: dict[str, Any], *, dry_run: bool) -
 
 
 def check(config: dict[str, Any], run_id: str, *, dry_run: bool) -> dict[str, Any]:
+    reconcile_runs(config)
     run = load_run(run_id)
     if run["status"] != "pending_review":
         return run
@@ -976,6 +1202,7 @@ def check(config: dict[str, Any], run_id: str, *, dry_run: bool) -> dict[str, An
 
 
 def check_all(config: dict[str, Any], *, dry_run: bool) -> list[dict[str, Any]]:
+    reconcile_runs(config)
     runs = []
     for path in sorted(RUNS_DIR.glob("*.json")):
         run = load_json(path, {})
