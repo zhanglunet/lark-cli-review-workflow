@@ -581,6 +581,9 @@ def find_review_decision(config: dict[str, Any], run: dict[str, Any], *, dry_run
     for item in as_list(raw):
         if not isinstance(item, dict):
             continue
+        sender = item.get("sender") or {}
+        if sender.get("sender_type") != "user":
+            continue
         text = content_text(item).lower()
         if token not in text:
             continue
@@ -695,22 +698,41 @@ def send_result(config: dict[str, Any], run: dict[str, Any], *, dry_run: bool) -
         lines.append(f"- {marker} {item.get('action_id')}")
         if not item.get("ok"):
             lines.append(f"  {item.get('error')}")
+    text = "\n".join(lines)
 
-    run_lark(
-        [
-            "im",
-            "+messages-send",
-            "--as",
-            config["result"].get("identity", "bot"),
-            "--chat-id",
-            run["source_chat_id"],
-            "--text",
-            "\n".join(lines),
-            "--idempotency-key",
-            f"result-{run['run_id']}",
-        ],
-        dry_run=dry_run,
-    )
+    try:
+        run_lark(
+            [
+                "im",
+                "+messages-send",
+                "--as",
+                config["result"].get("identity", "bot"),
+                "--chat-id",
+                run["source_chat_id"],
+                "--text",
+                text,
+                "--idempotency-key",
+                f"result-{run['run_id']}",
+            ],
+            dry_run=dry_run,
+        )
+    except WorkflowError as exc:
+        fallback_text = text + "\n\n原群回推失败，已改为私信通知审核人。\n" + str(exc)
+        run_lark(
+            [
+                "im",
+                "+messages-send",
+                "--as",
+                config["result"].get("identity", "bot"),
+                "--user-id",
+                config["reviewer_user_id"],
+                "--text",
+                fallback_text,
+                "--idempotency-key",
+                f"result-fallback-{run['run_id']}",
+            ],
+            dry_run=dry_run,
+        )
 
 
 def check(config: dict[str, Any], run_id: str, *, dry_run: bool) -> dict[str, Any]:

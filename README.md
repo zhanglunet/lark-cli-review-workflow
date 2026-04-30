@@ -249,6 +249,8 @@ python3 lark_workflow.py --config workflow_config.json --dry-run scan
 
 `check-all` 每次最多执行一个刚刚被批准的待处理 run，这样节奏更可控。
 
+执行结果默认回推到原群；如果机器人不在原群或回推失败，会自动私信审核人作为兜底通知。
+
 ## 项目目录
 
 每个群聊都有独立目录：

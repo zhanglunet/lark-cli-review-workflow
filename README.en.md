@@ -197,6 +197,8 @@ Dry-run command preview:
 python3 lark_workflow.py --config workflow_config.json --dry-run scan
 ```
 
+Execution results are sent back to the source chat by default. If the bot cannot post to that chat, the workflow automatically falls back to a direct message to the reviewer.
+
 ## Project Folders
 
 Outputs are stored by source chat:
