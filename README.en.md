@@ -217,6 +217,8 @@ projects/
 - `results/`: execution records
 - `context.md`: per-chat context notes
 
+If an execution produces a local file, such as a saved prompt `.txt`, the workflow sends the summary first and then uploads the generated file back to the source chat. If posting to the source chat fails, it falls back to a direct message to the reviewer.
+
 ## Scheduling
 
 Example launchd plist templates are in `examples/launchd/`.

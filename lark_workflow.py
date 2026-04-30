@@ -699,6 +699,11 @@ def send_result(config: dict[str, Any], run: dict[str, Any], *, dry_run: bool) -
         if not item.get("ok"):
             lines.append(f"  {item.get('error')}")
     text = "\n".join(lines)
+    artifact_paths = [
+        str(item.get("result", {}).get("saved_to"))
+        for item in run.get("results", [])
+        if item.get("ok") and isinstance(item.get("result"), dict) and item.get("result", {}).get("saved_to")
+    ]
 
     try:
         run_lark(
@@ -716,6 +721,22 @@ def send_result(config: dict[str, Any], run: dict[str, Any], *, dry_run: bool) -
             ],
             dry_run=dry_run,
         )
+        for index, artifact_path in enumerate(artifact_paths, 1):
+            run_lark(
+                [
+                    "im",
+                    "+messages-send",
+                    "--as",
+                    config["result"].get("identity", "bot"),
+                    "--chat-id",
+                    run["source_chat_id"],
+                    "--file",
+                    artifact_path,
+                    "--idempotency-key",
+                    f"result-file-{run['run_id']}-{index}",
+                ],
+                dry_run=dry_run,
+            )
     except WorkflowError as exc:
         fallback_text = text + "\n\n原群回推失败，已改为私信通知审核人。\n" + str(exc)
         run_lark(
@@ -733,6 +754,22 @@ def send_result(config: dict[str, Any], run: dict[str, Any], *, dry_run: bool) -
             ],
             dry_run=dry_run,
         )
+        for index, artifact_path in enumerate(artifact_paths, 1):
+            run_lark(
+                [
+                    "im",
+                    "+messages-send",
+                    "--as",
+                    config["result"].get("identity", "bot"),
+                    "--user-id",
+                    config["reviewer_user_id"],
+                    "--file",
+                    artifact_path,
+                    "--idempotency-key",
+                    f"result-fallback-file-{run['run_id']}-{index}",
+                ],
+                dry_run=dry_run,
+            )
 
 
 def check(config: dict[str, Any], run_id: str, *, dry_run: bool) -> dict[str, Any]:
