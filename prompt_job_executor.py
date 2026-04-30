@@ -6,7 +6,6 @@ import csv
 import json
 import os
 import subprocess
-import sys
 from pathlib import Path
 
 from docx import Document  # type: ignore
@@ -102,53 +101,79 @@ def build_context(input_dir: Path, max_chars: int) -> tuple[str, list[dict[str, 
     return "\n".join(sections).strip(), files_meta
 
 
-def run_openai_compatible(api_base: str, api_key: str, model: str, prompt: str, source_context: str) -> str:
-    payload = {
-        "model": model,
-        "messages": [
-            {
-                "role": "system",
-                "content": "You are a careful analyst. Use the provided source files as the primary evidence base. Produce a structured, high-quality result in Markdown.",
-            },
-            {
-                "role": "user",
-                "content": f"Prompt:\n{prompt}\n\nSource materials:\n{source_context}",
-            },
-        ],
-        "temperature": 0.2,
-    }
-    proc = subprocess.run(
+def build_codex_prompt(prompt: str, source_context: str, manifest_path: Path) -> str:
+    return "\n".join(
         [
-            "curl",
-            "-sS",
-            api_base.rstrip("/") + "/chat/completions",
-            "-H",
-            f"Authorization: Bearer {api_key}",
-            "-H",
-            "Content-Type: application/json",
-            "-d",
-            json.dumps(payload, ensure_ascii=False),
-        ],
+            "You are executing a reviewed workflow job.",
+            "Use the provided source files as the primary evidence base.",
+            "Return a polished final answer in Markdown.",
+            "When the prompt asks for a report, make it structured and detailed.",
+            "When the prompt asks for naming or strategy work, provide concrete options, rationale, and implementation steps.",
+            "Do not mention missing files unless the source section is empty.",
+            "",
+            f"Manifest path: {manifest_path}",
+            "",
+            "# User Prompt",
+            prompt.strip(),
+            "",
+            "# Source Materials",
+            source_context.strip() or "[No readable source files were found.]",
+        ]
+    ).strip() + "\n"
+
+
+def run_codex(
+    codex_bin: str,
+    model: str,
+    workdir: Path,
+    prompt_text: str,
+    output_path: Path,
+    trace_path: Path,
+) -> None:
+    cmd = [
+        codex_bin,
+        "exec",
+        "--skip-git-repo-check",
+        "--sandbox",
+        "read-only",
+        "--output-last-message",
+        str(output_path),
+        "--cd",
+        str(workdir),
+        "-",
+    ]
+    if model.strip():
+        cmd.extend(["--model", model.strip()])
+
+    proc = subprocess.run(
+        cmd,
+        input=prompt_text,
         text=True,
         capture_output=True,
         check=False,
     )
+    trace = {
+        "command": cmd,
+        "returncode": proc.returncode,
+        "stdout": proc.stdout,
+        "stderr": proc.stderr,
+    }
+    trace_path.write_text(json.dumps(trace, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     if proc.returncode != 0:
-        raise RuntimeError(proc.stderr.strip() or proc.stdout.strip() or "curl failed")
-    data = json.loads(proc.stdout)
-    if "error" in data:
-        raise RuntimeError(json.dumps(data["error"], ensure_ascii=False))
-    return data["choices"][0]["message"]["content"].strip()
+        raise RuntimeError(proc.stderr.strip() or proc.stdout.strip() or "codex exec failed")
+    if not output_path.exists():
+        raise RuntimeError("codex exec finished without writing the final message output")
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Execute prompt jobs with attached source files")
+    parser = argparse.ArgumentParser(description="Execute prompt jobs with local Codex and attached source files")
     parser.add_argument("--prompt", required=True)
     parser.add_argument("--inputs", required=True)
     parser.add_argument("--output", required=True)
     parser.add_argument("--manifest", required=True)
-    parser.add_argument("--provider", default=os.getenv("PROMPT_EXECUTOR_PROVIDER", "openrouter"))
-    parser.add_argument("--model", default=os.getenv("PROMPT_EXECUTOR_MODEL", "anthropic/claude-3.5-sonnet"))
+    parser.add_argument("--runner", default=os.getenv("PROMPT_EXECUTOR_RUNNER", "codex"))
+    parser.add_argument("--model", default=os.getenv("PROMPT_EXECUTOR_MODEL", "gpt-5.4"))
+    parser.add_argument("--codex-bin", default=os.getenv("CODEX_BIN", "codex"))
     parser.add_argument("--max-source-chars", type=int, default=30000)
     args = parser.parse_args()
 
@@ -160,36 +185,36 @@ def main() -> int:
 
     prompt = read_prompt(prompt_path)
     source_context, files_meta = build_context(input_dir, args.max_source_chars)
-    if not source_context:
-        source_context = "[No readable source files were found.]"
+    prompt_text = build_codex_prompt(prompt, source_context, manifest_path)
 
-    provider = args.provider.lower()
-    api_key = ""
-    api_base = ""
-    if provider == "openrouter":
-        api_key = os.getenv("OPENROUTER_API_KEY", "")
-        api_base = os.getenv("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1")
-    elif provider == "openai":
-        api_key = os.getenv("OPENAI_API_KEY", "")
-        api_base = os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1")
-    else:
-        raise RuntimeError(f"unsupported provider: {provider}")
-
-    if not api_key:
-        raise RuntimeError(f"missing API key for provider {provider}")
-
-    result_text = run_openai_compatible(api_base, api_key, args.model, prompt, source_context)
-
+    rendered_prompt_path = output_dir / "executor_prompt.txt"
+    rendered_prompt_path.write_text(prompt_text, encoding="utf-8")
     result_md = output_dir / "result.md"
-    result_md.write_text(result_text + "\n", encoding="utf-8")
+    trace_path = output_dir / "executor_trace.json"
+
+    runner = args.runner.lower().strip()
+    if runner != "codex":
+        raise RuntimeError(f"unsupported runner: {runner}")
+
+    run_codex(
+        codex_bin=args.codex_bin,
+        model=args.model,
+        workdir=manifest_path.parent,
+        prompt_text=prompt_text,
+        output_path=result_md,
+        trace_path=trace_path,
+    )
 
     metadata = {
-        "provider": provider,
+        "runner": runner,
         "model": args.model,
+        "codex_bin": args.codex_bin,
         "prompt_path": str(prompt_path),
         "manifest_path": str(manifest_path),
         "source_files": files_meta,
         "result_path": str(result_md),
+        "executor_prompt_path": str(rendered_prompt_path),
+        "executor_trace_path": str(trace_path),
     }
     (output_dir / "result.json").write_text(json.dumps(metadata, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     return 0

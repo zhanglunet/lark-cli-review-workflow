@@ -137,7 +137,7 @@ Edit `workflow_config.json`:
 - `scan.lookback_minutes`: scan lookback window
 - `prompt_capture`: prompt detection rules
 - `prompt_capture.source_files`: rules for auto-selecting source files for prompt execution
-- `prompt_execution.command`: local command template for actually executing `prompt + files`
+- `prompt_execution.command`: local command template for actually executing `prompt + files`, using local `codex` by default
 - `execution.projects_dir`: root folder for per-chat outputs
 - `execution.task_assignee`: optional default assignee
 - `execution.tasklist_id`: optional Lark tasklist
@@ -166,6 +166,7 @@ Source file selection for prompts:
 - If the prompt replies to a file message, that file is selected first
 - Additional files are selected from recent preceding messages
 - `prompt_capture.source_files.max_files` limits how many files are attached
+- If the prompt explicitly asks for "all files", `prompt_capture.source_files.max_all_files` is used instead
 - `prompt_capture.source_files.lookback_messages` controls the search window
 
 ## Usage
@@ -209,6 +210,13 @@ python3 lark_workflow.py --config workflow_config.json --dry-run scan
 Execution results are sent back to the source chat by default. If the bot cannot post to that chat, the workflow automatically falls back to a direct message to the reviewer.
 If a prompt execution produces local result files, the workflow sends both the result summary and the generated files back to the source chat.
 If `prompt_execution.command` is not configured yet, the workflow packages the prompt, source files, and `manifest.json` into a zip and reports that the executor is missing.
+
+The default executor uses local `codex`:
+
+- the workflow assembles a prompt job directory
+- `prompt_job_executor.py` reads the attached files, builds source context, and calls `codex exec`
+- outputs are written to `jobs/<run_id>/outputs/result.md` and `result.json`
+- the workflow then pushes the summary and generated files back to the source chat
 
 ## Project Folders
 

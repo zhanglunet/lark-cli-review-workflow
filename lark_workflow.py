@@ -436,6 +436,15 @@ def safe_dirname(name: str) -> str:
     return cleaned.strip(".") or "chat"
 
 
+def is_public_result_artifact(path: str) -> bool:
+    name = Path(path).name
+    if name in {"prompt.txt", "manifest.json", "executor_prompt.txt", "executor_trace.json"}:
+        return False
+    if name.endswith("-prompt-job.zip"):
+        return False
+    return True
+
+
 def project_root(config: dict[str, Any], run: dict[str, Any]) -> Path:
     projects_dir = Path(config["execution"].get("projects_dir", "projects"))
     by_chat_id = {chat["chat_id"]: chat for chat in config["source_chats"]}
@@ -1051,13 +1060,17 @@ def execute(config: dict[str, Any], run: dict[str, Any], *, dry_run: bool) -> di
                             if path.is_file():
                                 zf.write(path, arcname=str(path.relative_to(job_dir)))
 
-                artifact_paths = [str(bundle_path)] + output_files
+                artifact_paths = [path for path in output_files if is_public_result_artifact(path)]
+                internal_paths = [str(bundle_path)] + [path for path in output_files if not is_public_result_artifact(path)]
                 result = {
                     "saved_to": str(output),
                     "artifact_paths": artifact_paths,
+                    "internal_paths": internal_paths,
                     "source_files": downloaded_sources,
                 }
                 if not command:
+                    result["artifact_paths"] = [str(bundle_path)]
+                    result["internal_paths"] = [str(note_path)]
                     results.append(
                         {
                             "action_id": action["action_id"],

@@ -36,10 +36,10 @@
       "{output_dir}",
       "--manifest",
       "{manifest_path}",
-      "--provider",
-      "openrouter",
+      "--runner",
+      "codex",
       "--model",
-      "anthropic/claude-3.5-sonnet"
+      "gpt-5.4"
     ]
   },
   "approval": {

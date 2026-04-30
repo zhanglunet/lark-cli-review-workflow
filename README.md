@@ -159,7 +159,7 @@ cp workflow_config.example.json workflow_config.json
 - `scan.lookback_minutes`：扫描回看时间窗口
 - `prompt_capture`：提示词识别规则
 - `prompt_capture.source_files`：提示词自动关联数据源文件的规则
-- `prompt_execution.command`：真正执行 `prompt + 文件` 的本地命令模板
+- `prompt_execution.command`：真正执行 `prompt + 文件` 的本地命令模板，默认通过本地 `codex` 执行
 - `execution.projects_dir`：所有项目目录的根路径
 - `execution.task_assignee`：默认任务负责人，可为空
 - `execution.tasklist_id`：默认任务清单，可为空
@@ -191,6 +191,7 @@ cp workflow_config.example.json workflow_config.json
 - 如果提示词是回复某个文件消息，优先把该文件作为数据源
 - 再从提示词之前最近若干条消息里补充文件
 - 数量由 `prompt_capture.source_files.max_files` 控制
+- 如果提示词明确要求“分析群里所有文件”，则会改用 `prompt_capture.source_files.max_all_files`
 - 回看范围由 `prompt_capture.source_files.lookback_messages` 控制
 
 ## 使用方式
@@ -262,6 +263,13 @@ python3 lark_workflow.py --config workflow_config.json --dry-run scan
 
 如果某次提示词执行产出了本地结果文件，工作流会把结果摘要和结果文件一起回推到原群。
 如果还没有配置 `prompt_execution.command`，工作流会把 prompt、关联的数据源文件和 `manifest.json` 打包成 zip，并明确标记为“未配置执行器”。
+
+默认执行器是本地 `codex`：
+
+- 工作流先把 prompt 和关联文件整理成 job 目录
+- `prompt_job_executor.py` 会读取这些文件，拼装上下文，再调用 `codex exec`
+- 输出会落到 `jobs/<run_id>/outputs/result.md` 和 `result.json`
+- 工作流随后把结果摘要和产出文件发回原群
 
 ## 项目目录
 
