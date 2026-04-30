@@ -1,0 +1,8 @@
+.workflow-state/
+projects/
+downloads/
+*.log
+*.err
+workflow_config.json
+com.lark-workflow.*.plist
+__pycache__/

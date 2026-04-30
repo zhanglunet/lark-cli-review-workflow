@@ -1,0 +1,34 @@
+{
+  "source_chats": [
+    {
+      "name": "示例群",
+      "chat_id": "oc_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+      "project_dir": "示例群"
+    }
+  ],
+  "reviewer_user_id": "ou_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+  "scan": {
+    "lookback_minutes": 60,
+    "page_size": 50,
+    "message_identity": "user"
+  },
+  "prompt_capture": {
+    "min_chars": 20,
+    "keywords": ["prompt", "promt", "提示词", "指令", "请你", "帮我", "结合这个文档"]
+  },
+  "approval": {
+    "identity": "bot",
+    "timeout_minutes": 1440,
+    "approve_words": ["同意", "批准", "approve", "yes"],
+    "reject_words": ["拒绝", "reject", "no"]
+  },
+  "execution": {
+    "identity": "user",
+    "projects_dir": "projects",
+    "task_assignee": "",
+    "tasklist_id": ""
+  },
+  "result": {
+    "identity": "bot"
+  }
+}
