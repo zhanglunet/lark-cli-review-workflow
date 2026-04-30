@@ -23,6 +23,7 @@ import subprocess
 import sys
 import textwrap
 import uuid
+import zipfile
 from pathlib import Path
 from typing import Any
 
@@ -159,13 +160,24 @@ def flatten_text(items: list[Any]) -> list[str]:
 
 
 def extract_file_action(message: dict[str, Any]) -> dict[str, Any] | None:
+    file_info = extract_file_info(message)
+    if file_info:
+        return {
+            "kind": "download_file",
+            "message_id": file_info["message_id"],
+            "file_key": file_info["file_key"],
+            "file_name": file_info["file_name"],
+        }
+    return None
+
+
+def extract_file_info(message: dict[str, Any]) -> dict[str, Any] | None:
     content = content_obj(message)
     msg_type = message_type(message)
     if msg_type == "file" and isinstance(content, str):
         match = FILE_TAG_PATTERN.search(content)
         if match:
             return {
-                "kind": "download_file",
                 "message_id": message_id(message),
                 "file_key": match.group("key"),
                 "file_name": match.group("name"),
@@ -180,7 +192,6 @@ def extract_file_action(message: dict[str, Any]) -> dict[str, Any] | None:
         file_key = item.get("file_key") or item.get("fileKey") or item.get("key")
         if file_key and (msg_type == "file" or str(file_key).startswith("file_")):
             return {
-                "kind": "download_file",
                 "message_id": message_id(message),
                 "file_key": str(file_key),
                 "file_name": str(item.get("file_name") or item.get("name") or file_key),
@@ -243,6 +254,45 @@ def extract_prompt_action(message: dict[str, Any], config: dict[str, Any]) -> di
         "reply_to": message.get("reply_to") or "",
         "create_time": message.get("create_time") or "",
     }
+
+
+def attach_prompt_source_files(
+    action: dict[str, Any],
+    messages: list[dict[str, Any]],
+    current_index: int,
+    config: dict[str, Any],
+) -> dict[str, Any]:
+    source_cfg = config.get("prompt_capture", {}).get("source_files", {})
+    max_files = max(0, int(source_cfg.get("max_files", 3)))
+    lookback_messages = max(0, int(source_cfg.get("lookback_messages", 20)))
+    if max_files == 0:
+        action["source_files"] = []
+        return action
+
+    selected: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    reply_to = action.get("reply_to", "")
+    if reply_to:
+        for item in messages:
+            if message_id(item) == reply_to:
+                file_info = extract_file_info(item)
+                if file_info and file_info["message_id"] not in seen:
+                    selected.append(file_info)
+                    seen.add(file_info["message_id"])
+                break
+
+    start = max(0, current_index - lookback_messages)
+    for item in reversed(messages[start:current_index]):
+        file_info = extract_file_info(item)
+        if not file_info or file_info["message_id"] in seen:
+            continue
+        selected.append(file_info)
+        seen.add(file_info["message_id"])
+        if len(selected) >= max_files:
+            break
+
+    action["source_files"] = selected[:max_files]
+    return action
 
 
 def fingerprint(action: dict[str, Any]) -> str:
@@ -424,8 +474,9 @@ def scan_chat(config: dict[str, Any], source_chat: dict[str, str], *, dry_run: b
         dry_run=dry_run,
     )
 
+    messages = [item for item in as_list(raw) if isinstance(item, dict)]
     actions: list[dict[str, Any]] = []
-    for item in as_list(raw):
+    for index, item in enumerate(messages):
         if not isinstance(item, dict):
             continue
         file_action = extract_file_action(item)
@@ -434,6 +485,7 @@ def scan_chat(config: dict[str, Any], source_chat: dict[str, str], *, dry_run: b
         actions.extend(extract_task_actions(item))
         prompt_action = extract_prompt_action(item, config)
         if prompt_action:
+            prompt_action = attach_prompt_source_files(prompt_action, messages, index, config)
             actions.append(prompt_action)
 
     unique: list[dict[str, Any]] = []
@@ -506,7 +558,12 @@ def format_actions(actions: list[dict[str, Any]]) -> str:
         elif action["kind"] == "create_task":
             lines.append(f"{idx}. 创建任务：{action.get('summary')}（消息 {action.get('message_id')}）")
         elif action["kind"] == "capture_prompt":
-            lines.append(f"{idx}. 读取提示词：{action.get('summary')}（消息 {action.get('message_id')}）")
+            source_files = action.get("source_files", [])
+            source_note = ""
+            if source_files:
+                names = "、".join(str(item.get("file_name", "")) for item in source_files[:3])
+                source_note = f"；数据源：{names}"
+            lines.append(f"{idx}. 执行提示词：{action.get('summary')}（消息 {action.get('message_id')}）{source_note}")
         else:
             lines.append(f"{idx}. {action['kind']}：{action}")
     return "\n".join(lines)
@@ -647,7 +704,12 @@ def execute(config: dict[str, Any], run: dict[str, Any], *, dry_run: bool) -> di
                     cmd.extend(["--tasklist-id", config["execution"]["tasklist_id"]])
                 result = run_lark(cmd, dry_run=dry_run)
             elif action["kind"] == "capture_prompt":
-                output = prompt_dir / f"{action['action_id']}-{safe_filename(action['message_id'])}.txt"
+                job_dir = root / "jobs" / run["run_id"]
+                input_dir = job_dir / "inputs"
+                output_dir = job_dir / "outputs"
+                input_dir.mkdir(parents=True, exist_ok=True)
+                output_dir.mkdir(parents=True, exist_ok=True)
+                output = job_dir / "prompt.txt"
                 if not dry_run:
                     output.write_text(
                         "\n".join(
@@ -662,7 +724,124 @@ def execute(config: dict[str, Any], run: dict[str, Any], *, dry_run: bool) -> di
                         ),
                         encoding="utf-8",
                     )
-                result = {"saved_to": str(output)}
+                downloaded_sources: list[str] = []
+                for source in action.get("source_files", []):
+                    source_path = input_dir / f"{source['message_id']}-{safe_filename(source['file_name'])}"
+                    run_lark(
+                        [
+                            "im",
+                            "+messages-resources-download",
+                            "--as",
+                            config["execution"].get("identity", "user"),
+                            "--message-id",
+                            source["message_id"],
+                            "--file-key",
+                            source["file_key"],
+                            "--type",
+                            "file",
+                            "--output",
+                            str(source_path),
+                        ],
+                        dry_run=dry_run,
+                    )
+                    downloaded_sources.append(str(source_path))
+
+                manifest_path = job_dir / "manifest.json"
+                bundle_path = result_dir / f"{run['run_id']}-prompt-job.zip"
+                if not dry_run:
+                    save_json(
+                        manifest_path,
+                        {
+                            "run_id": run["run_id"],
+                            "source_chat_id": run["source_chat_id"],
+                            "source_chat_name": run.get("source_chat_name", ""),
+                            "message_id": action["message_id"],
+                            "prompt_path": str(output),
+                            "source_files": action.get("source_files", []),
+                            "downloaded_sources": downloaded_sources,
+                        },
+                    )
+
+                executor_cfg = config.get("prompt_execution", {})
+                command = executor_cfg.get("command", [])
+                output_files: list[str] = []
+                if command:
+                    replacements = {
+                        "{run_id}": run["run_id"],
+                        "{project_dir}": str(root),
+                        "{job_dir}": str(job_dir),
+                        "{prompt_path}": str(output),
+                        "{input_dir}": str(input_dir),
+                        "{output_dir}": str(output_dir),
+                        "{manifest_path}": str(manifest_path),
+                    }
+                    resolved = [str(token) for token in command]
+                    for idx, token in enumerate(resolved):
+                        for placeholder, value in replacements.items():
+                            token = token.replace(placeholder, value)
+                        resolved[idx] = token
+                    if not dry_run:
+                        proc = subprocess.run(resolved, text=True, capture_output=True)
+                        if proc.returncode != 0:
+                            raise WorkflowError(
+                                "prompt executor failed: "
+                                + " ".join(resolved)
+                                + "\n"
+                                + (proc.stderr.strip() or proc.stdout.strip())
+                            )
+                        stdout_path = output_dir / "executor.stdout.txt"
+                        if proc.stdout.strip():
+                            stdout_path.write_text(proc.stdout, encoding="utf-8")
+                        stderr_path = output_dir / "executor.stderr.txt"
+                        if proc.stderr.strip():
+                            stderr_path.write_text(proc.stderr, encoding="utf-8")
+                    output_files = sorted(str(path) for path in output_dir.rglob("*") if path.is_file())
+                else:
+                    note_path = output_dir / "EXECUTOR_NOT_CONFIGURED.txt"
+                    if not dry_run:
+                        note_path.write_text(
+                            "\n".join(
+                                [
+                                    "Prompt job has been packaged, but no prompt executor is configured.",
+                                    "",
+                                    "Configure prompt_execution.command in workflow_config.json to run prompt + source files automatically.",
+                                    "",
+                                    f"prompt_path: {output}",
+                                    f"manifest_path: {manifest_path}",
+                                ]
+                            ),
+                            encoding="utf-8",
+                        )
+                    output_files = [str(note_path)]
+
+                if not dry_run:
+                    with zipfile.ZipFile(bundle_path, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+                        for path in [output, manifest_path]:
+                            if path.exists():
+                                zf.write(path, arcname=str(path.relative_to(job_dir)))
+                        for path in input_dir.rglob("*"):
+                            if path.is_file():
+                                zf.write(path, arcname=str(path.relative_to(job_dir)))
+                        for path in output_dir.rglob("*"):
+                            if path.is_file():
+                                zf.write(path, arcname=str(path.relative_to(job_dir)))
+
+                artifact_paths = [str(bundle_path)] + output_files
+                result = {
+                    "saved_to": str(output),
+                    "artifact_paths": artifact_paths,
+                    "source_files": downloaded_sources,
+                }
+                if not command:
+                    results.append(
+                        {
+                            "action_id": action["action_id"],
+                            "ok": False,
+                            "error": "prompt executor is not configured; packaged prompt job and source files for manual processing",
+                            "result": result,
+                        }
+                    )
+                    continue
             else:
                 result = {"skipped": f"unknown action kind: {action['kind']}"}
             results.append({"action_id": action["action_id"], "ok": True, "result": result})
@@ -699,11 +878,16 @@ def send_result(config: dict[str, Any], run: dict[str, Any], *, dry_run: bool) -
         if not item.get("ok"):
             lines.append(f"  {item.get('error')}")
     text = "\n".join(lines)
-    artifact_paths = [
-        str(item.get("result", {}).get("saved_to"))
-        for item in run.get("results", [])
-        if item.get("ok") and isinstance(item.get("result"), dict) and item.get("result", {}).get("saved_to")
-    ]
+    artifact_paths: list[str] = []
+    for item in run.get("results", []):
+        if not isinstance(item.get("result"), dict):
+            continue
+        result = item.get("result", {})
+        saved_to = result.get("saved_to")
+        if saved_to:
+            artifact_paths.append(str(saved_to))
+        for path in result.get("artifact_paths", []):
+            artifact_paths.append(str(path))
 
     try:
         run_lark(

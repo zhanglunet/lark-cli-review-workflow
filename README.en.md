@@ -136,6 +136,8 @@ Edit `workflow_config.json`:
 - `reviewer_user_id`: reviewer open_id such as `ou_xxx`
 - `scan.lookback_minutes`: scan lookback window
 - `prompt_capture`: prompt detection rules
+- `prompt_capture.source_files`: rules for auto-selecting source files for prompt execution
+- `prompt_execution.command`: local command template for actually executing `prompt + files`
 - `execution.projects_dir`: root folder for per-chat outputs
 - `execution.task_assignee`: optional default assignee
 - `execution.tasklist_id`: optional Lark tasklist
@@ -158,6 +160,13 @@ Prompts:
 - Contains words such as `prompt`, `promt`, `提示词`, or `指令`
 - Or phrases such as `请你`, `帮我`, or `结合这个文档`
 - Meets `prompt_capture.min_chars`
+
+Source file selection for prompts:
+
+- If the prompt replies to a file message, that file is selected first
+- Additional files are selected from recent preceding messages
+- `prompt_capture.source_files.max_files` limits how many files are attached
+- `prompt_capture.source_files.lookback_messages` controls the search window
 
 ## Usage
 
@@ -198,6 +207,8 @@ python3 lark_workflow.py --config workflow_config.json --dry-run scan
 ```
 
 Execution results are sent back to the source chat by default. If the bot cannot post to that chat, the workflow automatically falls back to a direct message to the reviewer.
+If a prompt execution produces local result files, the workflow sends both the result summary and the generated files back to the source chat.
+If `prompt_execution.command` is not configured yet, the workflow packages the prompt, source files, and `manifest.json` into a zip and reports that the executor is missing.
 
 ## Project Folders
 
@@ -216,6 +227,7 @@ projects/
 - `prompts/`: approved prompt text
 - `results/`: execution records
 - `context.md`: per-chat context notes
+- `jobs/`: per-run prompt job directories with `prompt.txt`, input files, outputs, and `manifest.json`
 
 If an execution produces a local file, such as a saved prompt `.txt`, the workflow sends the summary first and then uploads the generated file back to the source chat. If posting to the source chat fails, it falls back to a direct message to the reviewer.
 

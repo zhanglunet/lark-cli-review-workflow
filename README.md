@@ -158,6 +158,8 @@ cp workflow_config.example.json workflow_config.json
 - `reviewer_user_id`：审核人 open_id，格式如 `ou_xxx`
 - `scan.lookback_minutes`：扫描回看时间窗口
 - `prompt_capture`：提示词识别规则
+- `prompt_capture.source_files`：提示词自动关联数据源文件的规则
+- `prompt_execution.command`：真正执行 `prompt + 文件` 的本地命令模板
 - `execution.projects_dir`：所有项目目录的根路径
 - `execution.task_assignee`：默认任务负责人，可为空
 - `execution.tasklist_id`：默认任务清单，可为空
@@ -183,6 +185,13 @@ cp workflow_config.example.json workflow_config.json
 - 同时满足 `prompt_capture.min_chars`
 
 提示词永远是单条审核、单条执行。一条提示词对应一个 `run_id`。
+
+提示词的数据源文件选择规则：
+
+- 如果提示词是回复某个文件消息，优先把该文件作为数据源
+- 再从提示词之前最近若干条消息里补充文件
+- 数量由 `prompt_capture.source_files.max_files` 控制
+- 回看范围由 `prompt_capture.source_files.lookback_messages` 控制
 
 ## 使用方式
 
@@ -251,6 +260,9 @@ python3 lark_workflow.py --config workflow_config.json --dry-run scan
 
 执行结果默认回推到原群；如果机器人不在原群或回推失败，会自动私信审核人作为兜底通知。
 
+如果某次提示词执行产出了本地结果文件，工作流会把结果摘要和结果文件一起回推到原群。
+如果还没有配置 `prompt_execution.command`，工作流会把 prompt、关联的数据源文件和 `manifest.json` 打包成 zip，并明确标记为“未配置执行器”。
+
 ## 项目目录
 
 每个群聊都有独立目录：
@@ -268,6 +280,7 @@ projects/
 - `prompts/`：审核通过后保存的提示词文本
 - `results/`：执行结果记录
 - `context.md`：该群的上下文说明
+- `jobs/`：每次 prompt 执行的作业目录，内含 `prompt.txt`、输入文件、输出文件和 `manifest.json`
 
 如果某次执行产出了本地文件（例如提示词保存成 `txt`），工作流会在发送执行结果摘要后，继续把该文件作为附件回推到原群；如果原群发送失败，则自动私信审核人。
 
