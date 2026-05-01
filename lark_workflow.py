@@ -84,6 +84,19 @@ DEFAULT_PROMPT_VISUAL_HINTS = [
     "标志",
     "视觉",
 ]
+DEFAULT_PROMPT_FOLLOWUP_HINTS = [
+    "再来一版",
+    "再设计",
+    "重做",
+    "重新设计",
+    "优化",
+    "改一下",
+    "修改",
+    "迭代",
+    "说明思路",
+    "设计思路",
+    "直接出图",
+]
 WORKFLOW_ARTIFACT_PATTERNS = [
     re.compile(r"^[0-9a-f]{16}-om_.*\.txt$", re.I),
     re.compile(r".*-prompt-job\.zip$", re.I),
@@ -318,21 +331,29 @@ def is_prompt_like_text(text: str, config: dict[str, Any]) -> bool:
     action_hints = [str(item).lower() for item in prompt_cfg.get("action_hints", DEFAULT_PROMPT_ACTION_HINTS)]
     data_hints = [str(item).lower() for item in prompt_cfg.get("data_hints", DEFAULT_PROMPT_DATA_HINTS)]
     visual_hints = [str(item).lower() for item in prompt_cfg.get("visual_hints", DEFAULT_PROMPT_VISUAL_HINTS)]
+    followup_hints = [str(item).lower() for item in prompt_cfg.get("followup_hints", DEFAULT_PROMPT_FOLLOWUP_HINTS)]
     lowered = normalized.lower()
     has_keyword = any(contains_prompt_token(lowered, keyword) for keyword in keywords) if keywords else False
     has_required_any = any(contains_prompt_token(lowered, token) for token in required_any) if required_any else False
     has_action_hint = any(contains_prompt_token(lowered, token) for token in action_hints) if action_hints else False
     has_data_hint = any(contains_prompt_token(lowered, token) for token in data_hints) if data_hints else False
     has_visual_hint = any(contains_prompt_token(lowered, token) for token in visual_hints) if visual_hints else False
+    has_followup_hint = any(contains_prompt_token(lowered, token) for token in followup_hints) if followup_hints else False
     is_visual_prompt = has_action_hint and has_visual_hint
+    is_followup_prompt = has_action_hint and has_followup_hint
 
     if len(normalized) < min_chars:
-        return len(normalized) >= short_visual_min_chars and is_visual_prompt
+        return len(normalized) >= short_visual_min_chars and (is_visual_prompt or is_followup_prompt)
 
-    return has_keyword or has_required_any or (has_action_hint and has_data_hint) or is_visual_prompt
+    return has_keyword or has_required_any or (has_action_hint and has_data_hint) or is_visual_prompt or is_followup_prompt
 
 
-def extract_prompt_action(message: dict[str, Any], config: dict[str, Any]) -> dict[str, Any] | None:
+def extract_prompt_action(
+    message: dict[str, Any],
+    config: dict[str, Any],
+    *,
+    reply_target_text: str = "",
+) -> dict[str, Any] | None:
     msg_type = message_type(message)
     if msg_type not in {"text", "post"}:
         return None
@@ -342,7 +363,18 @@ def extract_prompt_action(message: dict[str, Any], config: dict[str, Any]) -> di
     text = content_text(message).strip()
     if not text:
         return None
-    if not is_prompt_like_text(text, config):
+    is_prompt = is_prompt_like_text(text, config)
+    if not is_prompt and reply_target_text:
+        prompt_cfg = config.get("prompt_capture", {})
+        action_hints = [str(item).lower() for item in prompt_cfg.get("action_hints", DEFAULT_PROMPT_ACTION_HINTS)]
+        followup_hints = [str(item).lower() for item in prompt_cfg.get("followup_hints", DEFAULT_PROMPT_FOLLOWUP_HINTS)]
+        lowered = normalize_text(text).lower()
+        reply_lowered = normalize_text(reply_target_text).lower()
+        has_action_hint = any(contains_prompt_token(lowered, token) for token in action_hints) if action_hints else False
+        has_followup_hint = any(contains_prompt_token(lowered, token) for token in followup_hints) if followup_hints else False
+        reply_is_prompt_like = is_prompt_like_text(reply_target_text, config)
+        is_prompt = reply_is_prompt_like and has_action_hint and has_followup_hint
+    if not is_prompt:
         return None
 
     return {
@@ -375,6 +407,14 @@ def attach_prompt_source_files(
     seen: set[str] = set()
     reply_to = action.get("reply_to", "")
     if reply_to:
+        inherited = inherit_prompt_source_files(reply_to)
+        for item in inherited:
+            if item.get("message_id") not in seen:
+                selected.append(item)
+                seen.add(str(item.get("message_id", "")))
+                if len(selected) >= target_max:
+                    action["source_files"] = selected[:target_max]
+                    return action
         for item in messages:
             if message_id(item) == reply_to:
                 file_info = extract_file_info(item)
@@ -405,6 +445,27 @@ def attach_prompt_source_files(
 
     action["source_files"] = selected[:target_max]
     return action
+
+
+def inherit_prompt_source_files(reply_to_message_id: str) -> list[dict[str, Any]]:
+    inherited: list[dict[str, Any]] = []
+    if not reply_to_message_id:
+        return inherited
+    for path in sorted(RUNS_DIR.glob("*.json")):
+        run = load_json(path, {})
+        if not isinstance(run, dict):
+            continue
+        for action in run.get("actions", []):
+            if (
+                isinstance(action, dict)
+                and action.get("kind") == "capture_prompt"
+                and action.get("message_id") == reply_to_message_id
+            ):
+                for item in action.get("source_files", []):
+                    if isinstance(item, dict):
+                        inherited.append(item)
+                return inherited
+    return inherited
 
 
 def fingerprint(action: dict[str, Any]) -> str:
@@ -636,7 +697,14 @@ def scan_chat(config: dict[str, Any], source_chat: dict[str, str], *, dry_run: b
         if file_action:
             actions.append(file_action)
         actions.extend(extract_task_actions(item))
-        prompt_action = extract_prompt_action(item, config)
+        reply_target_text = ""
+        reply_to = item.get("reply_to") or ""
+        if reply_to:
+            for candidate in messages:
+                if message_id(candidate) == reply_to:
+                    reply_target_text = content_text(candidate).strip()
+                    break
+        prompt_action = extract_prompt_action(item, config, reply_target_text=reply_target_text)
         if prompt_action:
             prompt_action = attach_prompt_source_files(prompt_action, messages, index, config)
             actions.append(prompt_action)

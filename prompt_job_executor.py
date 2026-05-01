@@ -26,6 +26,7 @@ VISUAL_HINTS = [
     "标志",
     "视觉",
 ]
+IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp", ".svg"}
 
 
 def read_prompt(prompt_path: Path) -> str:
@@ -112,9 +113,12 @@ def build_context(input_dir: Path, max_chars: int) -> tuple[str, list[dict[str, 
     return "\n".join(sections).strip(), files_meta
 
 
-def is_visual_prompt(prompt: str) -> bool:
+def is_visual_prompt(prompt: str, files_meta: list[dict[str, str]]) -> bool:
     lowered = prompt.lower()
-    return any(token in lowered for token in VISUAL_HINTS) and any(token in lowered for token in ["设计", "绘制", "画", "logo", "svg"])
+    has_design_intent = any(token in lowered for token in ["设计", "绘制", "画", "重做", "优化", "改一下", "再设计", "说明设计思路"])
+    has_visual_hint = any(token in lowered for token in VISUAL_HINTS)
+    has_image_source = any(Path(item.get("name", "")).suffix.lower() in IMAGE_SUFFIXES for item in files_meta)
+    return (has_design_intent and has_visual_hint) or (has_design_intent and has_image_source)
 
 
 def build_codex_prompt(prompt: str, source_context: str, manifest_path: Path, *, output_mode: str) -> str:
@@ -184,7 +188,7 @@ def run_codex(
     prompt_text: str,
     output_path: Path,
     trace_path: Path,
-) -> None:
+) -> str:
     cmd = [
         codex_bin,
         "exec",
@@ -218,6 +222,7 @@ def run_codex(
         raise RuntimeError(proc.stderr.strip() or proc.stdout.strip() or "codex exec failed")
     if not output_path.exists():
         raise RuntimeError("codex exec finished without writing the final message output")
+    return model
 
 
 def main() -> int:
@@ -228,6 +233,7 @@ def main() -> int:
     parser.add_argument("--manifest", required=True)
     parser.add_argument("--runner", default=os.getenv("PROMPT_EXECUTOR_RUNNER", "codex"))
     parser.add_argument("--model", default=os.getenv("PROMPT_EXECUTOR_MODEL", "gpt-5.4"))
+    parser.add_argument("--visual-model", default=os.getenv("PROMPT_EXECUTOR_VISUAL_MODEL", "gpt-5.5"))
     parser.add_argument("--codex-bin", default=os.getenv("CODEX_BIN", "codex"))
     parser.add_argument("--max-source-chars", type=int, default=30000)
     args = parser.parse_args()
@@ -240,7 +246,8 @@ def main() -> int:
 
     prompt = read_prompt(prompt_path)
     source_context, files_meta = build_context(input_dir, args.max_source_chars)
-    output_mode = "svg" if is_visual_prompt(prompt) else "markdown"
+    output_mode = "svg" if is_visual_prompt(prompt, files_meta) else "markdown"
+    selected_model = args.visual_model if output_mode == "svg" else args.model
     prompt_text = build_codex_prompt(prompt, source_context, manifest_path, output_mode=output_mode)
 
     rendered_prompt_path = output_dir / "executor_prompt.txt"
@@ -252,14 +259,36 @@ def main() -> int:
     if runner != "codex":
         raise RuntimeError(f"unsupported runner: {runner}")
 
-    run_codex(
-        codex_bin=args.codex_bin,
-        model=args.model,
-        workdir=manifest_path.parent,
-        prompt_text=prompt_text,
-        output_path=result_path,
-        trace_path=trace_path,
-    )
+    actual_model = selected_model
+    model_fallback = ""
+    try:
+        actual_model = run_codex(
+            codex_bin=args.codex_bin,
+            model=selected_model,
+            workdir=manifest_path.parent,
+            prompt_text=prompt_text,
+            output_path=result_path,
+            trace_path=trace_path,
+        )
+    except RuntimeError as exc:
+        detail = str(exc)
+        if (
+            output_mode == "svg"
+            and args.visual_model.strip()
+            and args.visual_model.strip() != args.model.strip()
+            and "requires a newer version of Codex" in detail
+        ):
+            model_fallback = args.model
+            actual_model = run_codex(
+                codex_bin=args.codex_bin,
+                model=args.model,
+                workdir=manifest_path.parent,
+                prompt_text=prompt_text,
+                output_path=result_path,
+                trace_path=trace_path,
+            )
+        else:
+            raise
 
     if output_mode == "svg":
         svg = extract_svg_markup(result_path.read_text(encoding="utf-8", errors="ignore"))
@@ -282,7 +311,11 @@ def main() -> int:
 
     metadata = {
         "runner": runner,
-        "model": args.model,
+        "model": selected_model,
+        "actual_model": actual_model,
+        "default_model": args.model,
+        "visual_model": args.visual_model,
+        "model_fallback": model_fallback,
         "codex_bin": args.codex_bin,
         "output_mode": output_mode,
         "prompt_path": str(prompt_path),

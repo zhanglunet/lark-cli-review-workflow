@@ -268,6 +268,8 @@ python3 lark_workflow.py --config workflow_config.json --dry-run scan
 
 - 工作流先把 prompt 和关联文件整理成 job 目录
 - `prompt_job_executor.py` 会读取这些文件，拼装上下文，再调用 `codex exec`
+- 普通分析类默认使用 `gpt-5.4`
+- 设计类 / SVG 类任务默认切到更适合视觉创意约束的 `gpt-5.5`
 - 普通分析类输出会落到 `jobs/<run_id>/outputs/result.md` 和 `result.json`
 - 设计类 prompt 会优先产出 `jobs/<run_id>/outputs/result.svg`，并附一份简短的 `result.md`
 - 工作流随后把结果摘要和产出文件发回原群

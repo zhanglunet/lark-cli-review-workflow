@@ -215,6 +215,8 @@ The default executor uses local `codex`:
 
 - the workflow assembles a prompt job directory
 - `prompt_job_executor.py` reads the attached files, builds source context, and calls `codex exec`
+- regular analysis tasks use `gpt-5.4` by default
+- design / SVG tasks switch to `gpt-5.5` by default for stronger visual and creative constraint handling
 - regular analysis outputs are written to `jobs/<run_id>/outputs/result.md` and `result.json`
 - design-oriented prompts prefer `jobs/<run_id>/outputs/result.svg` and also include a short `result.md`
 - the workflow then pushes the summary and generated files back to the source chat
