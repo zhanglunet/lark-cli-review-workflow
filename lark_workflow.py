@@ -941,7 +941,7 @@ def find_review_decision(config: dict[str, Any], run: dict[str, Any], *, dry_run
             config["reviewer_user_id"],
             "--start",
             run["created_at"],
-            "--sort",
+            "--order",
             "desc",
             "--page-size",
             "50",
@@ -950,9 +950,21 @@ def find_review_decision(config: dict[str, Any], run: dict[str, Any], *, dry_run
         ],
         dry_run=dry_run,
     )
-    approve_words = [str(x).lower() for x in config["approval"].get("approve_words", ["同意", "approve"])]
-    reject_words = [str(x).lower() for x in config["approval"].get("reject_words", ["拒绝", "reject"])]
-    token = run["run_id"].lower()
+    approve_words = config["approval"].get("approve_words", ["同意", "approve"])
+    reject_words = config["approval"].get("reject_words", ["拒绝", "reject", "不同意"])
+    token = str(run["run_id"]).strip().casefold()
+    if not token:
+        return None
+
+    # Approval is a command, not a keyword in arbitrary prose. Full matching
+    # excludes negations, questions, quotations, mixed decisions and other IDs.
+    separator = r"(?:\s+|\s*[:：]\s*)"
+    decisions: dict[str, set[str]] = collections.defaultdict(set)
+    for words, decision in [(approve_words, "approved"), (reject_words, "rejected")]:
+        for word in words:
+            word = normalize_text(str(word)).casefold()
+            if word:
+                decisions[word].add(decision)
 
     for item in as_list(raw):
         if not isinstance(item, dict):
@@ -960,13 +972,20 @@ def find_review_decision(config: dict[str, Any], run: dict[str, Any], *, dry_run
         sender = item.get("sender") or {}
         if sender.get("sender_type") != "user":
             continue
-        text = content_text(item).lower()
-        if token not in text:
+        text = normalize_text(content_text(item)).casefold()
+        # Generated run IDs use ASCII letters/digits. Chinese prose next to
+        # the ID is a mention; an ASCII ID continuation is a different run.
+        if not re.search(rf"(?<![a-z0-9_-]){re.escape(token)}(?![a-z0-9_-])", text):
             continue
-        if any(word in text for word in reject_words):
-            return "rejected"
-        if any(word in text for word in approve_words):
-            return "approved"
+        matches: set[str] = set()
+        for word, outcomes in decisions.items():
+            command = re.escape(word)
+            task = re.escape(token)
+            if re.fullmatch(rf"(?:{command}{separator}{task}|{task}{separator}{command})[.!。！]*", text):
+                matches.update(outcomes)
+        # Do not fall back to an older approval after a newer ambiguous reply
+        # about this run. The reviewer must send a fresh explicit command.
+        return next(iter(matches)) if len(matches) == 1 else None
     return None
 
 
