@@ -941,7 +941,7 @@ def find_review_decision(config: dict[str, Any], run: dict[str, Any], *, dry_run
             config["reviewer_user_id"],
             "--start",
             run["created_at"],
-            "--sort",
+            "--order",
             "desc",
             "--page-size",
             "50",
@@ -973,7 +973,9 @@ def find_review_decision(config: dict[str, Any], run: dict[str, Any], *, dry_run
         if sender.get("sender_type") != "user":
             continue
         text = normalize_text(content_text(item)).casefold()
-        if not re.search(rf"(?<![\w-]){re.escape(token)}(?![\w-])", text):
+        # Generated run IDs use ASCII letters/digits. Chinese prose next to
+        # the ID is a mention; an ASCII ID continuation is a different run.
+        if not re.search(rf"(?<![a-z0-9_-]){re.escape(token)}(?![a-z0-9_-])", text):
             continue
         matches: set[str] = set()
         for word, outcomes in decisions.items():

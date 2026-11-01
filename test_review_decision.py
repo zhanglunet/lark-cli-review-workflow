@@ -68,6 +68,43 @@ class ReviewDecisionTests(unittest.TestCase):
                 {"run_id": "a1b2c3d4e5", "created_at": "2026-01-01T00:00:00Z"},
                 dry_run=False))
 
+    def test_chinese_adjacent_run_mentions_block_older_approval(self):
+        for newer in ["a1b2c3d4e5不同意", "任务a1b2c3d4e5 不同意",
+                      "任务a1b2c3d4e5待确认", "a1b2c3d4e5？", "（a1b2c3d4e5）暂缓"]:
+            with self.subTest(newer=newer):
+                self.assertIsNone(self.decide_sequence([newer, "同意 a1b2c3d4e5"]))
+
+    def test_different_run_mentions_do_not_hide_older_valid_decision(self):
+        for newer in ["不同意 xa1b2c3d4e5", "不同意 a1b2c3d4e5x",
+                      "不同意 0a1b2c3d4e5", "不同意 a1b2c3d4e50",
+                      "不同意 _a1b2c3d4e5", "不同意 a1b2c3d4e5_",
+                      "不同意 a1b2c3d4e5-other", "不同意 other-a1b2c3d4e5"]:
+            with self.subTest(newer=newer):
+                self.assertEqual(self.decide_sequence([newer, "同意 a1b2c3d4e5"]), "approved")
+
+    def test_latest_explicit_decision_wins_in_descending_order(self):
+        self.assertEqual(self.decide_sequence(["同意 a1b2c3d4e5", "拒绝 a1b2c3d4e5"]), "approved")
+        self.assertEqual(self.decide_sequence(["拒绝 a1b2c3d4e5", "同意 a1b2c3d4e5"]), "rejected")
+
+    def test_cli_requests_creation_time_descending_order(self):
+        with patch.object(workflow, "run_lark", return_value=[]) as cli:
+            workflow.find_review_decision(
+                {"approval": {}, "reviewer_user_id": "synthetic-reviewer"},
+                {"run_id": "a1b2c3d4e5", "created_at": "2026-01-01T00:00:00Z"}, dry_run=False)
+        args = cli.call_args.args[0]
+        self.assertIn("--order", args)
+        self.assertEqual(args[args.index("--order") + 1], "desc")
+
+    def decide_sequence(self, texts):
+        # CLI --order desc supplies newest first; no live conversation is read.
+        messages = [{"sender": {"sender_type": "user"}, "content": {"text": text},
+                     "create_time": str(2000 - index)} for index, text in enumerate(texts)]
+        with patch.object(workflow, "run_lark", return_value=messages):
+            result = workflow.find_review_decision(
+                {"approval": {}, "reviewer_user_id": "synthetic-reviewer"},
+                {"run_id": "a1b2c3d4e5", "created_at": "2026-01-01T00:00:00Z"}, dry_run=False)
+        return result
+
     def test_blank_run_cannot_approve(self):
         with patch.object(workflow, "run_lark", return_value=[
             {"sender": {"sender_type": "user"}, "content": {"text": "同意"}}
